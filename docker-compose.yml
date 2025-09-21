@@ -1,0 +1,120 @@
+version: "3.9"
+
+services:
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--log.level=INFO"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/traefik.yml:ro
+      - ./traefik/letsencrypt:/letsencrypt
+    environment:
+      - TZ=${TIMEZONE}
+    labels:
+      - "traefik.enable=true"
+      # Redirect HTTP -> HTTPS
+      - "traefik.http.routers.http-catchall.rule=HostRegexp(`{host:.+}`)"
+      - "traefik.http.routers.http-catchall.entrypoints=web"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+
+  postgres:
+    image: postgres:15
+    container_name: authentik-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - TZ=${TIMEZONE}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: authentik-redis
+    restart: unless-stopped
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:latest
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - ./.env
+    environment:
+      - AUTHENTIK_SECRET_KEY=${AUTHENTIK_SECRET_KEY}
+      - AUTHENTIK_POSTGRESQL__HOST=postgres
+      - AUTHENTIK_POSTGRESQL__USER=${POSTGRES_USER}
+      - AUTHENTIK_POSTGRESQL__NAME=${POSTGRES_DB}
+      - AUTHENTIK_POSTGRESQL__PASSWORD=${POSTGRES_PASSWORD}
+      - AUTHENTIK_REDIS__HOST=redis
+      - TZ=${TIMEZONE}
+    volumes:
+      - authentik-media:/media
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.authentik.rule=Host(`sso.${DOMAIN}`)"
+      - "traefik.http.routers.authentik.entrypoints=websecure"
+      - "traefik.http.routers.authentik.tls.certresolver=letsencrypt"
+      - "traefik.http.services.authentik.loadbalancer.server.port=9000"
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:latest
+    depends_on:
+      - authentik-server
+    env_file:
+      - ./.env
+    environment:
+      - AUTHENTIK_SECRET_KEY=${AUTHENTIK_SECRET_KEY}
+      - AUTHENTIK_POSTGRESQL__HOST=postgres
+      - AUTHENTIK_POSTGRESQL__USER=${POSTGRES_USER}
+      - AUTHENTIK_POSTGRESQL__NAME=${POSTGRES_DB}
+      - AUTHENTIK_POSTGRESQL__PASSWORD=${POSTGRES_PASSWORD}
+      - AUTHENTIK_REDIS__HOST=redis
+      - AUTHENTIK_WORKER=true
+      - TZ=${TIMEZONE}
+    restart: unless-stopped
+
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    depends_on:
+      - traefik
+    environment:
+      - PAPERLESS_SECRET_KEY=${PAPERLESS_SECRET_KEY}
+      - PAPERLESS_TIME_ZONE=${PAPERLESS_TIME_ZONE}
+    volumes:
+      - paperless-data:/usr/src/paperless/data
+      - paperless-media:/usr/src/paperless/media
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.paperless.rule=Host(`docs.${DOMAIN}`)"
+      - "traefik.http.routers.paperless.entrypoints=websecure"
+      - "traefik.http.routers.paperless.tls.certresolver=letsencrypt"
+      - "traefik.http.services.paperless.loadbalancer.server.port=8000"
+
+  mediastack:
+    image: nginx:alpine
+    depends_on:
+      - traefik
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mediastack.rule=Host(`media.${DOMAIN}`)"
+      - "traefik.http.routers.mediastack.entrypoints=websecure"
+      - "traefik.http.routers.mediastack.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mediastack.loadbalancer.server.port=80"
+
+volumes:
+  pgdata:
+  authentik-media:
+  paperless-data:
+  paperless-media:
